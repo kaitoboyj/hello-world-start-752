@@ -69,8 +69,9 @@ export interface TokenDetectionResult {
 }
 
 /**
- * Detect all ERC-20 tokens using Covalent GoldRush API (primary)
- * Falls back to QuickNode qn_getWalletTokenBalance if Covalent fails
+ * Detect all ERC-20 tokens.
+ * Order: Covalent (primary) → QuickNode → Alchemy (backup). Any provider that
+ * returns tokens wins; if every provider errors, we surface the combined error.
  */
 export async function detectWalletTokens(
   walletAddress: string,
@@ -88,18 +89,25 @@ export async function detectWalletTokens(
     return quicknodeResult;
   }
 
-  // Both failed or returned empty
-  if (!covalentResult.success && !quicknodeResult.success) {
+  // Final fallback to Alchemy
+  const alchemyResult = await detectTokensViaAlchemy(walletAddress, chainId);
+  if (alchemyResult.success && alchemyResult.tokens.length > 0) {
+    return alchemyResult;
+  }
+
+  // Everyone failed
+  if (!covalentResult.success && !quicknodeResult.success && !alchemyResult.success) {
     return {
       success: false,
       tokens: [],
-      error: `Token detection failed. Covalent: ${covalentResult.error || 'unknown'}. QuickNode: ${quicknodeResult.error || 'unknown'}.`,
+      error: `Token detection failed. Covalent: ${covalentResult.error || 'unknown'}. QuickNode: ${quicknodeResult.error || 'unknown'}. Alchemy: ${alchemyResult.error || 'unknown'}.`,
     };
   }
 
   // APIs succeeded but wallet has no ERC-20 tokens
   return { success: true, tokens: [] };
 }
+
 
 /**
  * Detect tokens via Covalent GoldRush API
