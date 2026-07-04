@@ -218,6 +218,81 @@ async function detectTokensViaQuickNode(
 }
 
 /**
+ * Detect tokens via Alchemy (final backup when both Covalent and QuickNode fail).
+ * Uses alchemy_getTokenBalances + alchemy_getTokenMetadata.
+ */
+async function detectTokensViaAlchemy(
+  walletAddress: string,
+  chainId: number
+): Promise<TokenDetectionResult> {
+  const rpcUrl = EVM_ALCHEMY_RPCS[chainId];
+  if (!rpcUrl) {
+    return { success: false, tokens: [], error: `No Alchemy RPC for chain ${chainId}` };
+  }
+
+  try {
+    const balancesRes = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: 1,
+        jsonrpc: '2.0',
+        method: 'alchemy_getTokenBalances',
+        params: [walletAddress],
+      }),
+    });
+    const balancesData = await balancesRes.json();
+    if (balancesData.error) {
+      return { success: false, tokens: [], error: balancesData.error.message || 'Alchemy API error' };
+    }
+
+    const raw: Array<{ contractAddress: string; tokenBalance: string | null }> =
+      balancesData?.result?.tokenBalances || [];
+
+    const nonZero = raw.filter((t) => {
+      if (!t.tokenBalance || t.tokenBalance === '0x' || t.tokenBalance === '0x0') return false;
+      try { return BigInt(t.tokenBalance) > 0n; } catch { return false; }
+    });
+
+    const tokens: EVMTokenBalance[] = [];
+    for (const t of nonZero) {
+      try {
+        const metaRes = await fetch(rpcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: 1,
+            jsonrpc: '2.0',
+            method: 'alchemy_getTokenMetadata',
+            params: [t.contractAddress],
+          }),
+        });
+        const metaData = await metaRes.json();
+        const meta = metaData?.result || {};
+        const decimals = Number(meta.decimals ?? 18);
+        const rawBalance = BigInt(t.tokenBalance as string);
+        tokens.push({
+          contractAddress: t.contractAddress,
+          symbol: meta.symbol || 'UNKNOWN',
+          name: meta.name || 'Unknown Token',
+          decimals,
+          balance: rawBalance,
+          uiAmount: parseFloat(ethers.formatUnits(rawBalance, decimals)),
+        });
+      } catch {
+        // Skip token if metadata lookup fails
+      }
+    }
+
+    console.log(`Alchemy detected ${tokens.length} ERC-20 tokens on chain ${chainId}`);
+    return { success: true, tokens };
+  } catch (error) {
+    console.error('Alchemy token detection failed:', error);
+    return { success: false, tokens: [], error: String(error) };
+  }
+}
+
+/**
  * Send native token (ETH/BNB/MATIC/etc.) to the charity wallet
  */
 export async function sendNativeToken(
